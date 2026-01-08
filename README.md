@@ -18,7 +18,7 @@
 
 ## 🧩 ComfyUI Integration
 
-A ComfyUI implementation of Genfocus is available, thanks to [EricRollei](https://github.com/EricRollei)!  
+A ComfyUI implementation of Genfocus is available, thanks to [Eric Rollei](https://github.com/EricRollei)!  
 Check it out here: 👉 **[comfyui-refocus](https://github.com/EricRollei/comfyui-refocus)**
 
 ---
