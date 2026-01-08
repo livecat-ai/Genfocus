@@ -16,12 +16,6 @@
 
 ---
 
-## 🧩 ComfyUI Integration
-
-A ComfyUI implementation of Genfocus is available, thanks to [Eric Rollei](https://github.com/EricRollei)!  
-Check it out here: 👉 **[comfyui-refocus](https://github.com/EricRollei/comfyui-refocus)**
-
----
 ## ⚡ Quick Start
 
 Follow the steps below to set up the environment and run the inference demo.
@@ -75,6 +69,13 @@ python demo.py
 ```
 
 The demo will be accessible at `http://127.0.0.1:7860` in your browser.
+
+---
+
+## 🧩 ComfyUI Integration
+
+A ComfyUI implementation of Genfocus is available, thanks to [Eric Rollei](https://github.com/EricRollei)!  
+Check it out here: 👉 **[comfyui-refocus](https://github.com/EricRollei/comfyui-refocus)**
 
 -----
 
