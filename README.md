@@ -16,6 +16,12 @@
 
 ---
 
+## 🧩 ComfyUI Integration
+
+A ComfyUI implementation of Genfocus is available, thanks to [EricRollei](https://github.com/EricRollei)!  
+Check it out here: 👉 **[comfyui-refocus](https://github.com/EricRollei/comfyui-refocus)**
+
+---
 ## ⚡ Quick Start
 
 Follow the steps below to set up the environment and run the inference demo.
@@ -79,7 +85,6 @@ We are actively working on improving this project. Current progress:
   - [x] **Upload Model Weights**
   - [x] **Release HF Demo & Gradio Code** (with tiling tricks for high-res images)
   - [ ] **Release Inference Code** (Support for adjustable parameters/settings)
-  - [ ] **Release ComfyUI Workflow / Node**
   - [ ] **Release Benchmark data**
   - [ ] **Release Training Code and Data**
 
