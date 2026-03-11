@@ -728,14 +728,18 @@ def generate(
                     
                     tile_indices = coord_to_idx[ch:h_end, cw:w_end].flatten()
                     tile_latents = latents[:, tile_indices]
-                    tile_c_latents_0 = c_latents[0][:, tile_indices] if use_cond else None
-                    tile_c_latents_1 = c_latents[1][:, tile_indices] if use_cond else None
-                    tile_c_latents=[tile_c_latents_0,tile_c_latents_1]
                     tile_latent_image_ids = latent_image_ids[tile_indices]
-                    tile_c_ids_0 = c_ids[0][tile_indices] if use_cond else None
-                    tile_c_ids_1 = c_ids[1][tile_indices] if use_cond else None
+                    
                     if tile_latents is None:
                         continue
+
+                    if use_cond and c_latents is not None:
+                        tile_c_latents = [c[:, tile_indices] for c in c_latents]
+                        tile_c_ids = [cid[tile_indices] for cid in c_ids]
+                    else:
+                        num_conds = len(c_latents) if c_latents is not None else 0
+                        tile_c_latents = [None] * num_conds
+                        tile_c_ids = [None] * num_conds
                     
 
 

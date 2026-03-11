@@ -162,9 +162,7 @@ def run_genfocus_pipeline(clean_input_processed, click_coords, K_value, cached_l
     print("   ► Running Stage 1: DeblurNet")
     switch_lora("deblur")
 
-    condition_0_img = Image.new("RGB", (w, h), (0, 0, 0))
-    cond0 = Condition(condition_0_img, "deblurring", [0, 32], 1.0)
-    cond1 = Condition(clean_input_processed, "deblurring", [0, 0], 1.0)
+    cond0 = Condition(clean_input_processed, "deblurring", [0, 0], 1.0)
 
     seed_everything(42)
     deblurred_img = generate(
@@ -173,7 +171,7 @@ def run_genfocus_pipeline(clean_input_processed, click_coords, K_value, cached_l
         width=w,
         prompt="a sharp photo with everything in focus",
         num_inference_steps=num_inference_steps,
-        conditions=[cond0, cond1],
+        conditions=[cond0],
         NO_TILED_DENOISE=no_tiled_denoise,
     ).images[0]
 
