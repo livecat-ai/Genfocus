@@ -79,6 +79,7 @@ You can also run inference directly via the command line for our different model
 ### 1. DeblurNet
 
 Restore sharp details from blurry images.
+> ⚠️ **Update Notice:** If you downloaded the weights before our recent inference command updates, please re-download the new `deblurNet.safetensors` to ensure best performance.
 
 ```bash
 python Inference_deblurNet.py \
@@ -86,8 +87,8 @@ python Inference_deblurNet.py \
   --output Deblurred_output.png 
 ```
 
-* **`--input`** / **`-i`**: Path to the input blurry image. *(Required)*
-* **`--output`** / **`-o`**: Path to save the output image. *(Default: `output_deblur.png`)*
+* **`--input`** / **`-i`**: Path to the input blurry image. 
+* **`--output`** / **`-o`**: Path to save the output image. 
 
 ---
 
@@ -104,12 +105,12 @@ python Inference_bokehNet.py \
   --output Bokeh_output.png 
 ```
 
-* **`--input`** / **`-i`**: Path to the All-In-Focus input image. *(Required)*
+* **`--input`** / **`-i`**: Path to the All-In-Focus input image. 
 * **`--mask`** / **`-m`**: Path to the in-focus mask image.
 * **`--point`** / **`-p`**: Focus point `x,y` on the ORIGINAL image (e.g., `512,300`).
 * **`--depth`** / **`-d`**: Path to a pre-computed depth map (`.npy` file). If not provided, Depth Pro is automatically used.
-* **`--k_value`** / **`-k`**: Blur strength K. *(Default: `15.0`)*
-* **`--output`** / **`-o`**: Path to save the output image. *(Default: `output_bokeh.png`)*
+* **`--k_value`** / **`-k`**: Blur strength K. 
+* **`--output`** / **`-o`**: Path to save the output image. 
 
 ---
 
@@ -117,16 +118,19 @@ python Inference_bokehNet.py \
 
 A variant of DeblurNet that utilizes a pre-deblurring module for heavily degraded images.
 
+**Note:** Please download the specific weight for this variant before running the inference:
 ```bash
+wget [https://huggingface.co/nycu-cplab/Genfocus-Model/resolve/main/deblurNet_with_pre_deblur.safetensors](https://huggingface.co/nycu-cplab/Genfocus-Model/resolve/main/deblurNet_with_pre_deblur.safetensors)
+
 python Inference_deblurNet_with_pre_deblur.py \
   --input inference_example/Blurry_example.jpg \
   --pre_deblur_input inference_example/Blurry_example_pre_deblur.jpg \
   --output Deblurred_output_with_pre_deblur.png 
 ```
 
-* **`--input`** / **`-i`**: Path to the input blurry image. *(Required)*
-* **`--pre_deblur_input`**: Path to the pre-processed/pre-deblurred image. *(Required)*
-* **`--output`** / **`-o`**: Path to save the output image. *(Default: `output_deblur_variant.png`)*
+* **`--input`** / **`-i`**: Path to the input blurry image. 
+* **`--pre_deblur_input`**: Path to the pre-processed/pre-deblurred image.
+* **`--output`** / **`-o`**: Path to save the output image. 
 
 ### ⚙️ Common Arguments
 
