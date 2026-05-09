@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+
+# Local model weights and checkpoints. Download these separately.
+*.safetensors
+*.safetensors_bak
+checkpoints/
+
+# Generated inference outputs.
+Deblurred_output*.png
+Bokeh_output*.png
+
+# Local environment files.
+.env
+.venv/
+venv/

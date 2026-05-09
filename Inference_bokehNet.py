@@ -7,6 +7,14 @@ from PIL import Image
 
 from diffusers import FluxPipeline
 from Genfocus.pipeline.flux import Condition, generate, seed_everything
+from Genfocus.runtime import (
+    clear_cuda_memory,
+    format_device_label,
+    get_pipeline_execution_device,
+    resolve_torch_device,
+    run_with_flux_memory_policy,
+    will_use_tiled_denoise,
+)
 
 try:
     import depth_pro
@@ -61,7 +69,21 @@ def main():
     
     parser.add_argument("--disable_tiling", action="store_true", help="Disable tiling tricks (NO_TILED_DENOISE=True)")
     parser.add_argument("--steps", type=int, default=28, help="Number of inference steps (default: 28)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for BokehNet generation.")
     parser.add_argument("--long_side", type=int, default=0, help="Resize long side (0 = keep original)")
+    parser.add_argument("--gpu_id", type=int, default=0, help="CUDA device index to use when running on GPU")
+    parser.add_argument(
+        "--offload_mode",
+        choices=["auto", "sequential", "model", "none"],
+        default="auto",
+        help="CUDA offload mode. 'auto' uses the most aggressive safe mode based on available VRAM.",
+    )
+    parser.add_argument(
+        "--vram_safety_margin_gb",
+        type=float,
+        default=0.5,
+        help="VRAM headroom reserved when --offload_mode=auto selects a mode.",
+    )
     
     args = parser.parse_args()
 
@@ -73,9 +95,8 @@ def main():
     if args.depth and not os.path.exists(args.depth):
         raise FileNotFoundError(f"❌ Depth array not found: {args.depth}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    print(f"🚀 Device detected: {device}")
+    device, dtype = resolve_torch_device(args.gpu_id)
+    print(f"🚀 Device detected: {format_device_label(device, args.gpu_id)}")
 
     
     print(f"🔄 Loading input: {args.input}")
@@ -84,6 +105,8 @@ def main():
     clean_input = resize_and_pad_image(raw_img, args.long_side)
     w, h = clean_input.size
     print(f"✅ Input processed size: {w}x{h}")
+    print(f"ℹ️ Inference steps: {args.steps}")
+    print(f"ℹ️ Seed: {args.seed}")
 
     
     if args.depth:
@@ -97,15 +120,24 @@ def main():
             raise ImportError("❌ 'depth_pro' is not installed, but --depth was not provided. Please provide a depth map or install depth_pro.")
         print("🔄 Running Depth Pro for dynamic depth prediction...")
         depth_model, depth_transform = depth_pro.create_model_and_transforms()
-        depth_model.eval().to(device)
-        
-        img_t = depth_transform(clean_input).to(device)
+        depth_model.eval()
+        if device.type == "cuda":
+            depth_model.to(device)
+
+        img_t = depth_transform(clean_input)
+        if device.type == "cuda":
+            img_t = img_t.to(device)
+
         with torch.no_grad():
             pred = depth_model.infer(img_t, f_px=None)
         depth_arr = pred["depth"].cpu().numpy().squeeze()
         depth_arr = cv2.resize(depth_arr, (w, h), interpolation=cv2.INTER_LINEAR)
         safe_depth = np.where(depth_arr > 0.0, depth_arr, np.finfo(np.float32).max)
         disp = 1.0 / safe_depth
+        del img_t, pred
+        if device.type == "cuda":
+            depth_model.to("cpu")
+            clear_cuda_memory(args.gpu_id)
         print("✅ Depth predicted successfully.")
 
     
@@ -142,8 +174,6 @@ def main():
    
     print("🔄 Loading FLUX pipeline...")
     pipe_flux = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=dtype)
-    if device == "cuda":
-        pipe_flux.to("cuda")
 
     print("🔄 Loading Bokeh LoRA...")
     try:
@@ -157,26 +187,42 @@ def main():
     force_no_tile = min(w, h) < 512
     no_tiled_denoise = bool(args.disable_tiling) or force_no_tile
     print(f"🚀 Starting Generation (K={args.k_value})... (Tiled Denoise Disabled: {no_tiled_denoise})")
+    tiled_expected = not no_tiled_denoise and will_use_tiled_denoise(w, h)
     
     cond_img = Condition(clean_input, "bokeh")
     cond_dmf = Condition(cond_map, "bokeh", [0, 0], 1.0, No_preprocess=True)
 
-    seed_everything(42)
-    gen = torch.Generator(device=device).manual_seed(1234)
+    def run_bokeh(_active_mode: str):
+        seed_everything(args.seed)
+        execution_device = get_pipeline_execution_device(pipe_flux, device)
+        gen = torch.Generator(device=execution_device).manual_seed(args.seed)
 
-    with torch.no_grad():
-        generated_bokeh = generate(
-            pipe_flux,
-            height=h,
-            width=w,
-            prompt="an excellent photo with a large aperture",
-            num_inference_steps=args.steps,
-            conditions=[cond_img, cond_dmf],
-            guidance_scale=1.0,
-            kv_cache=False,
-            generator=gen,
-            NO_TILED_DENOISE=no_tiled_denoise,
-        ).images[0]
+        with torch.no_grad():
+            return generate(
+                pipe_flux,
+                height=h,
+                width=w,
+                prompt="an excellent photo with a large aperture",
+                num_inference_steps=args.steps,
+                conditions=[cond_img, cond_dmf],
+                guidance_scale=1.0,
+                kv_cache=False,
+                generator=gen,
+                NO_TILED_DENOISE=no_tiled_denoise,
+            ).images[0]
+
+    generated_bokeh, _ = run_with_flux_memory_policy(
+        pipe=pipe_flux,
+        requested_mode=args.offload_mode,
+        device=device,
+        gpu_id=args.gpu_id,
+        width=w,
+        height=h,
+        condition_count=2,
+        safety_margin_gb=args.vram_safety_margin_gb,
+        tiled_expected=tiled_expected,
+        run_fn=run_bokeh,
+    )
 
     
     generated_bokeh.save(args.output)

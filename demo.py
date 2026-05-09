@@ -8,6 +8,14 @@ from PIL import Image, ImageDraw
 from skimage import color, img_as_float32, img_as_ubyte
 from diffusers import FluxPipeline
 from Genfocus.pipeline.flux import Condition, generate, seed_everything
+from Genfocus.runtime import (
+    clear_cuda_memory,
+    format_device_label,
+    get_pipeline_execution_device,
+    resolve_torch_device,
+    run_with_flux_memory_policy,
+    will_use_tiled_denoise,
+)
 
 import depth_pro
 
@@ -22,26 +30,22 @@ if not os.path.exists(os.path.join(DEBLUR_LORA_PATH, DEBLUR_WEIGHT_NAME)):
 if not os.path.exists(os.path.join(BOKEH_LORA_DIR, BOKEH_WEIGHT_NAME)):
     print(f"❌ Warning: {BOKEH_WEIGHT_NAME} not found.")
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+GPU_ID = int(os.environ.get("GENFOCUS_GPU_ID", "0"))
+OFFLOAD_MODE = os.environ.get("GENFOCUS_OFFLOAD_MODE", "auto")
+VRAM_SAFETY_MARGIN_GB = float(os.environ.get("GENFOCUS_VRAM_SAFETY_MARGIN_GB", "0.5"))
 
-print(f"🚀 Device detected: {device}")
+device, dtype = resolve_torch_device(GPU_ID)
+
+print(f"🚀 Device detected: {format_device_label(device, GPU_ID)}")
 
 print("🔄 Loading FLUX pipeline...")
 pipe_flux = FluxPipeline.from_pretrained(MODEL_ID, torch_dtype=dtype)
 current_adapter = None
 
-if device == "cuda":
-    print("🚀 Moving FLUX to CUDA...")
-    pipe_flux.to("cuda")
-
 print("🔄 Loading Depth Pro model...")
 try:
     depth_model, depth_transform = depth_pro.create_model_and_transforms()
-    if device == "cuda":
-        depth_model.eval().to("cuda")
-    else:
-        depth_model.eval()
+    depth_model.eval()
     print("✅ Depth Pro loaded.")
 except Exception as e:
     print(f"❌ Failed to load Depth Pro: {e}")
@@ -158,22 +162,37 @@ def run_genfocus_pipeline(clean_input_processed, click_coords, K_value, cached_l
     force_no_tile = min(w, h) < 512
     no_tiled_denoise = bool(disable_tiling_tricks_for_accel) or force_no_tile
     print(f"🚀 Starting Genfocus Pipeline... (Size: {w}x{h})")
+    tiled_expected = not no_tiled_denoise and will_use_tiled_denoise(w, h)
 
     print("   ► Running Stage 1: DeblurNet")
     switch_lora("deblur")
 
     cond0 = Condition(clean_input_processed, "deblurring", [0, 0], 1.0)
 
-    seed_everything(42)
-    deblurred_img = generate(
-        pipe_flux,
-        height=h,
+    def run_deblur(_active_mode: str):
+        seed_everything(42)
+        return generate(
+            pipe_flux,
+            height=h,
+            width=w,
+            prompt="a sharp photo with everything in focus",
+            num_inference_steps=num_inference_steps,
+            conditions=[cond0],
+            NO_TILED_DENOISE=no_tiled_denoise,
+        ).images[0]
+
+    deblurred_img, _ = run_with_flux_memory_policy(
+        pipe=pipe_flux,
+        requested_mode=OFFLOAD_MODE,
+        device=device,
+        gpu_id=GPU_ID,
         width=w,
-        prompt="a sharp photo with everything in focus",
-        num_inference_steps=num_inference_steps,
-        conditions=[cond0],
-        NO_TILED_DENOISE=no_tiled_denoise,
-    ).images[0]
+        height=h,
+        condition_count=1,
+        safety_margin_gb=VRAM_SAFETY_MARGIN_GB,
+        tiled_expected=tiled_expected,
+        run_fn=run_deblur,
+    )
 
     if K_value == 0:
         print("✅ K=0, returning Deblur result.")
@@ -187,14 +206,19 @@ def run_genfocus_pipeline(clean_input_processed, click_coords, K_value, cached_l
 
     try:
         img_t = depth_transform(deblurred_img)
-        if device == "cuda":
-            img_t = img_t.to("cuda")
+        if device.type == "cuda":
+            depth_model.to(device)
+            img_t = img_t.to(device)
         with torch.no_grad():
             pred = depth_model.infer(img_t, f_px=None)
         depth_map = pred["depth"].cpu().numpy().squeeze()
         safe_depth = np.where(depth_map > 0.0, depth_map, np.finfo(np.float32).max)
         disp_orig = 1.0 / safe_depth
         disp = cv2.resize(disp_orig, (w, h), interpolation=cv2.INTER_LINEAR)
+        del img_t, pred
+        if device.type == "cuda":
+            depth_model.to("cpu")
+            clear_cuda_memory(GPU_ID)
     except Exception as e:
         print(f"❌ Depth Error: {e}")
         return deblurred_img, cached_latents
@@ -210,48 +234,62 @@ def run_genfocus_pipeline(clean_input_processed, click_coords, K_value, cached_l
     defocus_t = torch.from_numpy(defocus_abs).unsqueeze(0).float()
     cond_map = (defocus_t / MAX_COC).clamp(0, 1).repeat(3, 1, 1).unsqueeze(0)
 
-    if cached_latents is None:
-        print("      Generating new fixed latents...")
-        seed_everything(42)
-        gen = torch.Generator(device=pipe_flux.device).manual_seed(1234)
-        latents, _ = pipe_flux.prepare_latents(
-            batch_size=1,
-            num_channels_latents=16,
-            height=h,
-            width=w,
-            dtype=pipe_flux.dtype,
-            device=pipe_flux.device,
-            generator=gen,
-            latents=None,
-        )
-        current_latents = latents
-    else:
-        print("      Using cached latents...")
-        current_latents = cached_latents
-
     switch_lora("bokeh")
     cond_img = Condition(deblurred_img, "bokeh")
     cond_dmf = Condition(cond_map, "bokeh", [0, 0], 1.0, No_preprocess=True)
 
-    seed_everything(42)
-    gen = torch.Generator(device=pipe_flux.device).manual_seed(1234)
+    def run_bokeh(_active_mode: str):
+        seed_everything(42)
+        execution_device = get_pipeline_execution_device(pipe_flux, device)
+        if cached_latents is None:
+            print("      Generating new fixed latents...")
+            gen_for_latents = torch.Generator(device=execution_device).manual_seed(1234)
+            latents, _ = pipe_flux.prepare_latents(
+                batch_size=1,
+                num_channels_latents=16,
+                height=h,
+                width=w,
+                dtype=pipe_flux.dtype,
+                device=execution_device,
+                generator=gen_for_latents,
+                latents=None,
+            )
+            active_latents = latents
+        else:
+            print("      Using cached latents...")
+            active_latents = cached_latents.to(device=execution_device, dtype=pipe_flux.dtype)
 
-    with torch.no_grad():
-        res = generate(
-            pipe_flux,
-            height=h,
-            width=w,
-            prompt="an excellent photo with a large aperture",
-            num_inference_steps=num_inference_steps,
-            conditions=[cond_img, cond_dmf],
-            guidance_scale=1.0,
-            kv_cache=False,
-            generator=gen,
-            latents=current_latents,
-            NO_TILED_DENOISE=no_tiled_denoise,
-        )
-    generated_bokeh = res.images[0]
-    return generated_bokeh, current_latents
+        gen = torch.Generator(device=execution_device).manual_seed(1234)
+        with torch.no_grad():
+            res = generate(
+                pipe_flux,
+                height=h,
+                width=w,
+                prompt="an excellent photo with a large aperture",
+                num_inference_steps=num_inference_steps,
+                conditions=[cond_img, cond_dmf],
+                guidance_scale=1.0,
+                kv_cache=False,
+                generator=gen,
+                latents=active_latents,
+                NO_TILED_DENOISE=no_tiled_denoise,
+            )
+        return res.images[0], active_latents.detach().cpu()
+
+    stage2_result, _ = run_with_flux_memory_policy(
+        pipe=pipe_flux,
+        requested_mode=OFFLOAD_MODE,
+        device=device,
+        gpu_id=GPU_ID,
+        width=w,
+        height=h,
+        condition_count=2,
+        safety_margin_gb=VRAM_SAFETY_MARGIN_GB,
+        tiled_expected=tiled_expected,
+        run_fn=run_bokeh,
+    )
+    generated_bokeh, cached_latents_out = stage2_result
+    return generated_bokeh, cached_latents_out
 
 
 css = """

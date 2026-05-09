@@ -35,14 +35,56 @@ def clip_hidden_states(hidden_states: torch.FloatTensor) -> torch.FloatTensor:
         hidden_states = hidden_states.clip(-65504, 65504)
     return hidden_states
 
+def call_with_offload_hook(module: torch.nn.Module, fn: Callable[..., Any], *args, **kwargs):
+    hook = getattr(module, "_hf_hook", None)
+    if hook is not None:
+        args, kwargs = hook.pre_forward(module, *args, **kwargs)
+
+    output = fn(*args, **kwargs)
+
+    if hook is not None:
+        output = hook.post_forward(module, output)
+
+    return output
+
+def offload_module(module: Optional[torch.nn.Module]):
+    if module is None:
+        return
+
+    hook = getattr(module, "_hf_hook", None)
+    if hook is None or not hasattr(hook, "init_hook"):
+        return
+
+    try:
+        current_device = next(module.parameters()).device
+    except StopIteration:
+        current_device = None
+
+    if current_device is None or current_device.type == "cpu":
+        return
+
+    hook.init_hook(module)
+
+    if current_device.type == "cuda":
+        torch.cuda.empty_cache()
+
 def encode_images(pipeline: FluxPipeline, images: torch.Tensor,No_preprocess=False):
     """
     Encodes the images into tokens and ids for FLUX pipeline.
     """
     if not No_preprocess:
         images = pipeline.image_processor.preprocess(images)
-    images = images.to(pipeline.device).to(pipeline.dtype)
-    images = pipeline.vae.encode(images).latent_dist.sample()
+
+    device = getattr(pipeline, "_execution_device", pipeline.device)
+
+    images = images.to(device=device, dtype=pipeline.dtype)
+    images = call_with_offload_hook(
+        pipeline.vae,
+        pipeline.vae.encode,
+        images,
+    ).latent_dist.sample()
+    offload_module(pipeline.vae)
+
     images = (
         images - pipeline.vae.config.shift_factor
     ) * pipeline.vae.config.scaling_factor
@@ -51,7 +93,7 @@ def encode_images(pipeline: FluxPipeline, images: torch.Tensor,No_preprocess=Fal
         images.shape[0],
         images.shape[2],
         images.shape[3],
-        pipeline.device,
+        device,
         pipeline.dtype,
     )
     if images_tokens.shape[1] != images_ids.shape[0]:
@@ -59,7 +101,7 @@ def encode_images(pipeline: FluxPipeline, images: torch.Tensor,No_preprocess=Fal
             images.shape[0],
             images.shape[2] // 2,
             images.shape[3] // 2,
-            pipeline.device,
+            device,
             pipeline.dtype,
         )
     return images_tokens, images_ids
@@ -489,6 +531,13 @@ def generate(
 ):
     self = pipeline
 
+    def run_transformer_with_offload(**kwargs):
+        return call_with_offload_hook(
+            self.transformer,
+            lambda **module_kwargs: transformer_forward(self.transformer, **module_kwargs),
+            **kwargs,
+        )
+
     height = height or self.default_sample_size * self.vae_scale_factor
     width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -531,6 +580,8 @@ def generate(
         num_images_per_prompt=num_images_per_prompt,
         max_sequence_length=max_sequence_length,
     )
+    offload_module(self.text_encoder)
+    offload_module(self.text_encoder_2)
 
     # Prepare latent variables
     num_channels_latents = self.transformer.config.in_channels // 4
@@ -544,17 +595,6 @@ def generate(
         generator,
         latents,
     )
-    _, fixed_latent_image_ids = self.prepare_latents(
-        batch_size * num_images_per_prompt,
-        num_channels_latents,
-        512,
-        512,
-        prompt_embeds.dtype,
-        device,
-        generator,
-        latents,
-    )
-
     if latent_mask is not None:
         latent_mask = latent_mask.T.reshape(-1)
         latents = latents[:, latent_mask]
@@ -744,11 +784,10 @@ def generate(
 
 
                     # Process tile through transformer
-                    tile_noise_pred = transformer_forward(
-                        self.transformer,
+                    tile_noise_pred = run_transformer_with_offload(
                         image_features=[tile_latents] + (tile_c_latents if use_cond else []),
                         text_features=[prompt_embeds],
-                        img_ids=[fixed_latent_image_ids] + ([fixed_latent_image_ids,fixed_latent_image_ids] if use_cond else []),
+                        img_ids=[tile_latent_image_ids] + (tile_c_ids if use_cond else []),
                         txt_ids=[text_ids],
                         timesteps=[timestep, timestep] + (c_timesteps if use_cond else []),
                         pooled_projections=[pooled_prompt_embeds] * 2
@@ -777,8 +816,7 @@ def generate(
                 
             else:
                 # Standard processing for small images
-                noise_pred = transformer_forward(
-                    self.transformer,
+                noise_pred = run_transformer_with_offload(
                     image_features=[latents] + (c_latents if use_cond else []),
                     text_features=[prompt_embeds],
                     img_ids=[latent_image_ids] + (c_ids if use_cond else []),
@@ -798,8 +836,7 @@ def generate(
 
 
             if image_guidance_scale != 1.0:
-                unc_pred = transformer_forward(
-                    self.transformer,
+                unc_pred = run_transformer_with_offload(
                     image_features=[latents] + (uc_latents if use_cond else []),
                     text_features=[prompt_embeds],
                     img_ids=[latent_image_ids] + (c_ids if use_cond else []),
@@ -871,7 +908,12 @@ def generate(
         latents = (
             latents / self.vae.config.scaling_factor
         ) + self.vae.config.shift_factor
-        image = self.vae.decode(latents, return_dict=False)[0]
+        image = call_with_offload_hook(
+            self.vae,
+            self.vae.decode,
+            latents,
+            return_dict=False,
+        )[0]
         image = self.image_processor.postprocess(image, output_type=output_type)
 
     # Offload all models

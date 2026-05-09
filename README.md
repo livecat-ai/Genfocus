@@ -90,6 +90,8 @@ python Inference_deblurNet.py \
 * **`--input`** / **`-i`**: Path to the input blurry image. 
 * **`--output`** / **`-o`**: Path to save the output image. 
 
+For higher-resolution DeblurNet inference, `--tile_mode pixel` now runs independent RGB crops through the model before stitching. This produced better detail than latent-space tiling in our local tests because each tile is encoded independently instead of slicing a single full-image latent after VAE encoding. On the tested `2304x1584` example, pixel tiling remained visually reliable up to about `--long_side 1728`; larger values started to make fine details clump together inside tiles. If that appears on your content, prefer deblurring at `1728` or below and then upscaling afterward.
+
 ---
 
 ### 2. BokehNet 
@@ -140,7 +142,30 @@ python Inference_deblurNet_with_pre_deblur.py \
 | --- | --- | --- | --- |
 | `--disable_tiling` | Flag | `False` | Force disable tiling (`NO_TILED_DENOISE=True`). *Note: Tiling is auto-disabled if the shortest edge is < 512px.* |
 | `--steps` | Integer | `28` | Number of inference steps. Higher steps usually yield better details but take longer. |
+| `--seed` | Integer | `42` | Random seed. In `--tile_mode pixel`, the exact same seed is reused for every tile. |
 | `--long_side` | Integer | `0` | Resize the longest edge of the image (aspect ratio preserved, padded to multiple of 16). `0` keeps original size. |
+| `--gpu_id` | Integer | `0` | CUDA device index to use when running on GPU. |
+| `--offload_mode` | String | `auto` | FLUX memory policy. `auto` checks current free VRAM and tries the fastest viable mode, falling back if needed. `sequential` minimizes VRAM use, `model` uses more VRAM for better speed, and `none` keeps the full FLUX pipeline on GPU. |
+| `--vram_safety_margin_gb` | Float | `0.5` | Headroom reserved by `auto` mode before it chooses a more aggressive GPU placement. Increase this if the GPU is shared with other workloads. |
+| `--tile_mode` | String | `latent` | Tiling strategy. `latent` uses the original latent-space tiled denoise path. `pixel` deblurs independent RGB tiles before stitching. |
+| `--pixel_tile_size` | Integer | `512` | Tile size for `--tile_mode pixel`. Use a multiple of `16`. |
+| `--pixel_tile_overlap` | Integer | `0` | Requested overlap for `--tile_mode pixel`. Overlap regions are feather-blended during stitching. |
+
+DeblurNet tiling notes:
+- `latent` tiling is lighter-weight, but it still encodes the full resized image once and then slices tiles in latent space. It is not equivalent to independent `512x512` crop inference.
+- `pixel` tiling is slower, but it matched the model's preferred `512x512` operating scale more closely in local testing.
+- On the tested `2304x1584` example, pixel tiling stayed strongest up to about `--long_side 1728`. Beyond that, some fine details started to clump inside tiles, which likely indicates a scale/distribution limit rather than a seam-blending issue.
+
+### Demo VRAM Controls
+
+The Gradio demo also supports the same VRAM policy through environment variables:
+
+```bash
+GENFOCUS_GPU_ID=1 \
+GENFOCUS_OFFLOAD_MODE=auto \
+GENFOCUS_VRAM_SAFETY_MARGIN_GB=0.5 \
+python demo.py
+```
 
 ---
 
