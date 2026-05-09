@@ -15,6 +15,19 @@
 
 ---
 
+## About This Fork
+
+This fork keeps the original Genfocus models and workflow, but adds runtime changes aimed at lower-memory machines and higher-resolution DeblurNet output.
+
+Main changes in this version:
+
+- **Automatic FLUX offloading:** CLI scripts and the Gradio demo can choose a memory placement strategy based on available VRAM.
+- **Explicit low-memory controls:** `--offload_mode`, `--vram_safety_margin_gb`, `--gpu_id`, `--steps`, and `--long_side` make memory/speed trade-offs configurable from the command line.
+- **DeblurNet pixel-space tiling:** `--tile_mode pixel` processes independent RGB tiles and stitches them back together, which can preserve more high-resolution detail than the original latent-space tiling path.
+- **Safer high-resolution inference:** images can be resized with `--long_side`, padded to model-compatible dimensions, processed in tiles, and blended with optional tile overlap.
+
+The original project is available at [rayray9999/Genfocus](https://github.com/rayray9999/Genfocus). Use the install command below if you specifically want this lower-memory/high-resolution fork.
+
 ## ⚡ Quick Start
 
 Follow the steps below to set up the environment and run the inference demo.
@@ -24,7 +37,7 @@ Follow the steps below to set up the environment and run the inference demo.
 Clone the repository:
 
 ```bash
-git clone git@github.com:rayray9999/Genfocus.git
+git clone https://github.com/livecat-ai/Genfocus.git
 cd Genfocus
 ```
 
@@ -81,6 +94,13 @@ python demo.py
 
 `GENFOCUS_OFFLOAD_MODE` accepts `auto`, `sequential`, `model`, or `none`. Use `auto` unless you need to force a specific placement strategy.
 
+How the demo memory controls work:
+
+- `auto` estimates the current CUDA memory situation and tries to use the fastest viable mode, falling back to safer offload modes if needed.
+- `sequential` is the lowest-memory option because modules are moved on and off the GPU more aggressively. It is slower, but is the safest first choice on constrained GPUs.
+- `model` keeps more of each model on GPU than `sequential`, so it is usually faster but needs more VRAM.
+- `none` keeps the FLUX pipeline on GPU and is intended for high-VRAM cards.
+
 ---
 
 ## ⚡ Inference (Command Line)
@@ -126,6 +146,16 @@ python Inference_deblurNet.py \
 ```
 
 For higher-resolution DeblurNet inference, `--tile_mode pixel` runs independent RGB crops through the model before stitching. This can produce better detail than latent-space tiling because each tile is encoded independently instead of slicing one full-image latent after VAE encoding.
+
+How the new DeblurNet pixel tiling works:
+
+- The input is first optionally resized with `--long_side` while preserving aspect ratio.
+- The resized image is padded to dimensions compatible with the model.
+- In `--tile_mode pixel`, the script crops the processed RGB image into `--pixel_tile_size` tiles.
+- Each tile is deblurred independently with the same seed, which keeps the tile behavior reproducible.
+- Tiles are stitched back into the final image. If `--pixel_tile_overlap` is greater than `0`, overlap regions are feather-blended to reduce seams.
+
+This differs from `--tile_mode latent`, which encodes the full image once and then tiles the latent representation during denoising. Latent tiling is lighter and remains the default, but pixel tiling can work better when the goal is high-resolution local detail.
 
 ---
 
@@ -197,6 +227,14 @@ These arguments are available on `Inference_deblurNet.py`, `Inference_bokehNet.p
 | `--gpu_id` | Integer | `0` | CUDA device index to use when running on GPU. |
 | `--offload_mode` | String | `auto` | FLUX memory policy. `auto` checks current free VRAM and tries the fastest viable mode, falling back if needed. `sequential` minimizes VRAM use, `model` uses more VRAM for better speed, and `none` keeps the full FLUX pipeline on GPU. |
 | `--vram_safety_margin_gb` | Float | `0.5` | Headroom reserved by `auto` mode before it chooses a more aggressive GPU placement. Increase this if the GPU is shared with other workloads. |
+
+Memory behavior:
+
+- Lower `--long_side` values reduce image resolution before inference and usually reduce memory use substantially.
+- Lower `--steps` values reduce runtime and memory pressure during generation, but can reduce final quality.
+- `--offload_mode auto` is the recommended default for most users.
+- If `auto` still runs out of memory, retry with `--offload_mode sequential`, a smaller `--long_side`, or fewer `--steps`.
+- If you have a large GPU and want speed, try `--offload_mode model` or `--offload_mode none`.
 
 ### 🧩 DeblurNet Pixel Tiling
 
